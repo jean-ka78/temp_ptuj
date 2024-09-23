@@ -26,46 +26,70 @@ def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(SSID, PASSWORD)
+    print('Connecting to Wi-Fi...')
     while not wlan.isconnected():
-        print('Connecting to network...')
         time.sleep(1)
     print('Connected to Wi-Fi:', wlan.ifconfig())
+
+# Функція перевірки з'єднання Wi-Fi і перепідключення при втраті
+def check_wifi_connection():
+    wlan = network.WLAN(network.STA_IF)
+    if not wlan.isconnected():
+        print('Wi-Fi connection lost. Reconnecting...')
+        connect_wifi()
 
 # Функція зчитування температури
 def read_temperature():
     roms = ds_sensor.scan()
     ds_sensor.convert_temp()
     time.sleep(1)
-    for rom in roms:
-        temp = ds_sensor.read_temp(rom)
-        smoothedValue = 0.9 * smoothedValue + 0.1 * temp
-        return round(smoothedValue, 2)  # Округлення до двох знаків після коми
+    if roms:
+        return ds_sensor.read_temp(roms[0])  # Повертаємо температуру з першого датчика
 
 # Фільтр ковзного середнього для згладжування показників температури
-def moving_average_filter(new_value, values, window_size):
-    values.append(new_value)
-    if len(values) > window_size:
-        values.pop(0)
-    return round(sum(values) / len(values),2)
+def moving_average_filter(new_value, smoothed_value):
+    return 0.9 * smoothed_value + 0.1 * new_value
 
 # Основна програма
 def main():
     connect_wifi()
-    
+
     client = MQTTClient(CLIENT_ID, MQTT_BROKER, user=MQTT_USER, password=MQTT_PASSWORD)
-    client.connect()
-    
-    temperature_values = []
-    window_size = 10  # Розмір вікна для фільтрації
+    try:
+        client.connect()
+    except Exception as e:
+        print('Failed to connect to MQTT broker:', e)
+        return
 
     try:
+        # Ініціалізація першим виміряним значенням температури
+        initial_temperature = read_temperature()
+        if initial_temperature is None:
+            print("No sensors found.")
+            return
+        
+        smoothed_temperature = initial_temperature  # Використовуємо перше значення для згладження
+
         while True:
+            check_wifi_connection()  # Перевіряємо з'єднання з Wi-Fi
+
             raw_temperature = read_temperature()
-            smoothed_temperature = moving_average_filter(raw_temperature, temperature_values, window_size)
-            print("Raw Temperature:", raw_temperature)
-            print("Smoothed Temperature:", smoothed_temperature)
-            client.publish(MQTT_TOPIC, str(smoothed_temperature))
+            if raw_temperature is not None:
+                smoothed_temperature = moving_average_filter(raw_temperature, smoothed_temperature)
+                print("Raw Temperature:", raw_temperature)
+                print("Smoothed Temperature:", round(smoothed_temperature, 2))
+
+                try:
+                    client.publish(MQTT_TOPIC, str(round(smoothed_temperature, 2)))
+                except Exception as e:
+                    print('MQTT publish failed, reconnecting to MQTT broker:', e)
+                    try:
+                        client.connect()  # Перепідключаємо MQTT-клієнт
+                    except Exception as e:
+                        print('Failed to reconnect to MQTT broker:', e)
+
             time.sleep(1)
+
     except KeyboardInterrupt:
         client.disconnect()
         print("Program terminated")
